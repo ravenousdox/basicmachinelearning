@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""
+Real‑time face recognition and dynamic hand‑gesture recognition using OpenCV, face_recognition, and MediaPipe.
+
+Usage:
+    python opencv_mediapipe_face_hand_gesture.py --image path/to/caleb.jpg
+
+Keys during execution:
+    g   - memorize the current hand pose and assign it a label typed in the console
+    q   - quit the application
+
+Dependencies (install via pip):
+    opencv-python mediapipe face_recognition numpy
+    # face_recognition requires dlib; on Windows install cmake then dlib:
+    pip install cmake
+    pip install dlib
+
+The script assumes exactly one reference image that contains a single, clearly visible face.
+"""
+
+import cv2
+import face_recognition
+import mediapipe as mp
+import numpy as np
+import argparse
+import sys
+
+
+def embed_hand(hand_landmarks):
+    """Return a translation‑ and scale‑invariant vector embedding for one hand."""
+    coords = np.array([[lm.x, lm.y, lm.z] for lm in hand_landmarks.landmark], dtype=np.float32)
+    # Translate so that the wrist (landmark 0) is at the origin
+    coords -= coords[0]
+    # Uniformly scale by the maximum landmark distance from the origin
+    scale = np.linalg.norm(coords, axis=1).max()
+    if scale > 0:
+        coords /= scale
+    return coords.flatten()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Face + hand‑gesture recognition in real time")
+    parser.add_argument("--image", required=True, help="Path to reference face image")
+    parser.add_argument("--threshold", type=float, default=0.5,
+                        help="Euclidean distance threshold for gesture match (smaller = stricter)")
+    args = parser.parse_args()
+
+    # --- Face reference encoding -----------------------------------------------------------
+    ref_img = face_recognition.load_image_file(args.image)
+    ref_encs = face_recognition.face_encodings(ref_img)
+    if not ref_encs:
+        sys.exit("No face detected in reference image – aborting.")
+    ref_encoding = ref_encs[0]
+    ref_name = "caleb henderson"
+
+    # --- MediaPipe Hands -------------------------------------------------------------------
+    mp_hands = mp.solutions.hands
+    mp_draw = mp.solutions.drawing_utils
+    hands = mp_hands.Hands(
+        static_image_mode=False,
+        max_num_hands=2,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
+    )
+
+    # --- Gesture dictionary ----------------------------------------------------------------
+    gestures = {}  # {name: embedding}
+
+    # --- Webcam stream ---------------------------------------------------------------------
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        sys.exit("Unable to open webcam.")
+
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+
+        # Face detection & recognition ------------------------------------------------------
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        face_locs = face_recognition.face_locations(rgb)
+        face_encs = face_recognition.face_encodings(rgb, face_locs)
+        for (top, right, bottom, left), enc in zip(face_locs, face_encs):
+            match = face_recognition.compare_faces([ref_encoding], enc, tolerance=0.5)[0]
+            if match:
+                cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+                cv2.putText(frame, ref_name, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.8, (0, 255, 0), 2, cv2.LINE_AA)
+
+        # Hand pose detection ---------------------------------------------------------------
+        results = hands.process(rgb)
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+                embedding = embed_hand(hand_landmarks)
+
+                # Gesture recognition ------------------------------------------------------
+                label, best_dist = None, float("inf")
+                for name, template in gestures.items():
+                    dist = np.linalg.norm(embedding - template)
+                    if dist < best_dist:
+                        best_dist = dist
+                        label = name
+                if label and best_dist < args.threshold:
+                    h, w, _ = frame.shape
+                    wrist = hand_landmarks.landmark[0]
+                    wx, wy = int(w * wrist.x), int(h * wrist.y)
+                    cv2.putText(frame, label, (wx, wy - 20), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.9, (255, 0, 0), 2, cv2.LINE_AA)
+
+        cv2.imshow("Face & Gesture", frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+        elif key == ord('g'):
+            # Memorize the first detected hand pose
+            if results.multi_hand_landmarks:
+                print("Enter name for this gesture: ", end='', flush=True)
+                gesture_name = input().strip()
+                if gesture_name:
+                    gestures[gesture_name] = embed_hand(results.multi_hand_landmarks[0])
+                    print(f"Gesture '{gesture_name}' learned (templates stored: {len(gestures)})")
+                else:
+                    print("Empty name – gesture discarded.")
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()
